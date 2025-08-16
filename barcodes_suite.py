@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# Barcodes Suite (Offline) — v6
-# New: UI toggle to enable/disable highlighting in "Check Against Masterlist"
-# - When ON: clear fills, then highlight matched cells yellow
-# - When OFF: clear fills, no highlighting, still add Status/summary and counts
-# Existing checker: remove existing barcodes, clear highlights, delete blank rows
-# Matching: 5–14 digits after stripping leading zeros; reads .xlsx/.xlsm/.xls/.csv; scans all sheets
+# Barcodes Suite (Offline) — v7
+# - Reset buttons on both tabs
+# - Masterlist check: per-column counts in row1/row2 for multi-column sheets
+# - Existing checker: per-column counts ("non-existing", "existing") in row1/row2 for multi-column sheets
+# - Stronger style clearing (fills + conditional formatting) to avoid retained highlights
+# - Matching: 5–14 digits after stripping leading zeros
+# - Reads .xlsx/.xlsm/.xls/.csv; scans all sheets
 
 import os, re, sys, csv, sqlite3
 from typing import Iterable, List, Set, Tuple, Dict
@@ -165,12 +166,23 @@ def masterlist_contains(codes: Iterable[str]) -> Set[str]:
     con.close(); return present
 
 
-def clear_all_fills(wb):
+def clear_all_fills_and_rules(wb):
     for ws in wb.worksheets:
         for row in ws.iter_rows():
             for cell in row:
-                if cell.fill is not None and cell.fill.fill_type is not None:
+                if getattr(cell, "fill", None) is not None:
                     cell.fill = PatternFill(fill_type=None)
+        try:
+            cf = getattr(ws, "conditional_formatting", None)
+            if cf is not None:
+                if hasattr(cf, "clear"):
+                    cf.clear()  # type: ignore
+                elif hasattr(cf, "_cf_rules"):
+                    cf._cf_rules.clear()  # type: ignore
+                elif hasattr(cf, "cf_rules"):
+                    cf.cf_rules.clear()  # type: ignore
+        except Exception:
+            pass
 
 
 def used_columns_count(ws) -> int:
@@ -184,24 +196,23 @@ def used_columns_count(ws) -> int:
 
 
 def process_masterlist_check(in_path: str, out_path: str, master_present: Set[str], do_highlight: bool) -> Tuple[int,int,int]:
-    """
-    Clear fills; if do_highlight=True, highlight matched cells.
-    Add Status (1-col) or top summary rows (multi-col).
-    Returns (occ_match, occ_unmatch, cells_highlighted).
-    """
     wb = load_workbook_generic(in_path)
-    clear_all_fills(wb)
+    clear_all_fills_and_rules(wb)
 
     total_occ_matches=0; total_occ_unmatches=0; total_cells_highlighted=0
 
     for ws in wb.worksheets:
         occ_m=0; occ_u=0; cells_h=0
         single_col = (used_columns_count(ws) <= 1)
-        if single_col:
-            ws.cell(row=1, column=2, value="Status")
 
         max_row = ws.max_row or 0
         max_col = ws.max_column or 0
+        col_match = [0]*(max_col+1)
+        col_unmatch = [0]*(max_col+1)
+
+        if single_col:
+            ws.cell(row=1, column=2, value="Status")
+
         for r in range(1, max_row+1):
             for c in range(1, max_col+1):
                 cell = ws.cell(row=r, column=c)
@@ -214,8 +225,10 @@ def process_masterlist_check(in_path: str, out_path: str, master_present: Set[st
 
                 any_match = any(nc in master_present for nc in norm_codes)
                 for nc in norm_codes:
-                    if nc in master_present: occ_m += 1; total_occ_matches += 1
-                    else: occ_u += 1; total_occ_unmatches += 1
+                    if nc in master_present:
+                        occ_m += 1; total_occ_matches += 1; col_match[c] += 1
+                    else:
+                        occ_u += 1; total_occ_unmatches += 1; col_unmatch[c] += 1
 
                 if do_highlight and any_match:
                     cell.fill = YELLOW_FILL
@@ -224,10 +237,11 @@ def process_masterlist_check(in_path: str, out_path: str, master_present: Set[st
                 if single_col and c == 1:
                     ws.cell(row=r, column=2, value=("match" if any_match else "unmatch"))
 
-        if not single_col:
+        if not single_col and max_col > 0:
             ws.insert_rows(1, 2)
-            ws.cell(row=1, column=1, value=f"unmatch: {occ_u}")
-            ws.cell(row=2, column=1, value=f"match: {occ_m}")
+            for c in range(1, max_col+1):
+                ws.cell(row=1, column=c, value=f"unmatch: {col_unmatch[c]}")
+                ws.cell(row=2, column=c, value=f"match: {col_match[c]}")
 
     wb.save(out_path)
     return total_occ_matches, total_occ_unmatches, total_cells_highlighted
@@ -239,18 +253,16 @@ def extract_barcodes_from_single_file(path: str) -> Set[str]:
 
 
 def remove_matches_existing(existing_codes: Set[str], second_path: str, out_path: str) -> Tuple[int,int,int,int]:
-    """
-    Clear ALL fills; remove existing barcodes; set empty cells to None; delete fully blank rows.
-    Returns (occ_removed, occ_left, cells_touched, rows_deleted_total).
-    """
     wb = load_workbook_generic(second_path)
-    clear_all_fills(wb)
+    clear_all_fills_and_rules(wb)
 
     occ_removed=0; occ_left=0; cells_touched=0; rows_deleted_total=0
 
     for ws in wb.worksheets:
         max_row = ws.max_row or 0
         max_col = ws.max_column or 0
+        col_existing = [0]*(max_col+1)
+        col_nonexisting = [0]*(max_col+1)
 
         for r in range(1, max_row+1):
             for c in range(1, max_col+1):
@@ -279,14 +291,14 @@ def remove_matches_existing(existing_codes: Set[str], second_path: str, out_path
                 if removed_here > 0 or left_here > 0:
                     cells_touched += 1
 
-                # Ensure no highlight remains
-                if cell.fill is not None and cell.fill.fill_type is not None:
+                if getattr(cell, "fill", None) is not None:
                     cell.fill = PatternFill(fill_type=None)
 
                 cell.value = (None if new_text == "" else new_text)
                 occ_removed += removed_here; occ_left += left_here
+                col_existing[c] += removed_here
+                col_nonexisting[c] += left_here
 
-        # Delete fully blank rows bottom-up
         empties = []
         max_row = ws.max_row or 0
         max_col = ws.max_column or 0
@@ -300,6 +312,12 @@ def remove_matches_existing(existing_codes: Set[str], second_path: str, out_path
         for r in reversed(empties):
             ws.delete_rows(r, 1); rows_deleted_total += 1
 
+        if max_col > 1:
+            ws.insert_rows(1, 2)
+            for c in range(1, max_col+1):
+                ws.cell(row=1, column=c, value=f"non-existing: {col_nonexisting[c]}")
+                ws.cell(row=2, column=c, value=f"existing: {col_existing[c]}")
+
     wb.save(out_path)
     return occ_removed, occ_left, cells_touched, rows_deleted_total
 
@@ -308,7 +326,7 @@ class BarcodesSuiteApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("880x620")
+        self.geometry("900x640")
         self.resizable(True, True)
         ensure_db()
         self._build_ui()
@@ -318,7 +336,7 @@ class BarcodesSuiteApp(tk.Tk):
         pad = 10
         nb = ttk.Notebook(self); nb.pack(fill="both", expand=True, padx=pad, pady=pad)
 
-        # Masterlist
+        # Masterlist Tab
         self.tab_master = ttk.Frame(nb); nb.add(self.tab_master, text="Masterlist")
         self.lbl_master = ttk.Label(self.tab_master, text="Masterlist size: 0 barcodes", font=("Segoe UI", 10, "bold"))
         self.lbl_master.pack(anchor="w", padx=pad, pady=(pad, 4))
@@ -326,7 +344,7 @@ class BarcodesSuiteApp(tk.Tk):
         ttk.Button(btns, text="Load/Replace Masterlist (Excel/CSV)…", command=self.on_load_master).pack(side="left", padx=(0,8))
         ttk.Button(btns, text="Clear Masterlist", command=self.on_clear_master).pack(side="left", padx=(0,8))
         ttk.Label(self.tab_master, text="Reads .xlsx/.xlsm/.xls/.csv • Only 5–14 digits treated as barcodes (leading zeros ignored).",
-                  wraplength=840, foreground="#444").pack(anchor="w", padx=pad)
+                  wraplength=860, foreground="#444").pack(anchor="w", padx=pad)
 
         # Check Against Masterlist
         self.tab_check = ttk.Frame(nb); nb.add(self.tab_check, text="Check Against Masterlist")
@@ -335,10 +353,11 @@ class BarcodesSuiteApp(tk.Tk):
         frm1 = ttk.Frame(self.tab_check); frm1.pack(fill="x", padx=pad, pady=4)
         self.entry_check_file = ttk.Entry(frm1); self.entry_check_file.pack(side="left", fill="x", expand=True)
         ttk.Button(frm1, text="Browse…", command=self.on_browse_check_file).pack(side="left", padx=(6,0))
-        # NEW: toggle
         self.var_highlight = tk.BooleanVar(value=True)
         ttk.Checkbutton(self.tab_check, text="Highlight matches in yellow", variable=self.var_highlight).pack(anchor="w", padx=pad, pady=4)
-        ttk.Button(self.tab_check, text="Run Check & Save", command=self.on_run_check).pack(anchor="w", padx=pad, pady=(6,8))
+        act = ttk.Frame(self.tab_check); act.pack(fill="x", padx=pad, pady=(0,6))
+        ttk.Button(act, text="Run Check & Save", command=self.on_run_check).pack(side="left")
+        ttk.Button(act, text="Reset", command=self.on_reset_check).pack(side="left", padx=(8,0))
         self.txt_check_log = tk.Text(self.tab_check, height=12); self.txt_check_log.pack(fill="both", expand=True, padx=pad, pady=(0,pad))
 
         # Existing Barcodes Checker
@@ -353,7 +372,9 @@ class BarcodesSuiteApp(tk.Tk):
         ttk.Label(frmb, text="Second file (Excel/CSV): ").pack(side="left")
         self.entry_second = ttk.Entry(frmb); self.entry_second.pack(side="left", fill="x", expand=True, padx=(6,6))
         ttk.Button(frmb, text="Browse…", command=self.on_browse_second).pack(side="left")
-        ttk.Button(self.tab_twofile, text="Run & Save Cleaned Second File", command=self.on_run_twofile).pack(anchor="w", padx=pad, pady=(6,8))
+        act2 = ttk.Frame(self.tab_twofile); act2.pack(fill="x", padx=pad, pady=(0,6))
+        ttk.Button(act2, text="Run & Save Cleaned Second File", command=self.on_run_twofile).pack(side="left")
+        ttk.Button(act2, text="Reset", command=self.on_reset_twofile).pack(side="left", padx=(8,0))
         self.txt_twofile_log = tk.Text(self.tab_twofile, height=12); self.txt_twofile_log.pack(fill="both", expand=True, padx=pad, pady=(0,pad))
 
         footer = ttk.Label(self, text="Offline • Reads .xlsx .xlsm .xls .csv • Leading zeros ignored • 5–14 digits", foreground="#666")
@@ -387,6 +408,11 @@ class BarcodesSuiteApp(tk.Tk):
                                           filetypes=[("Excel/CSV", "*.xlsx *.xlsm *.xls *.csv"), ("All files","*.*")])
         if path:
             self.entry_check_file.delete(0, tk.END); self.entry_check_file.insert(0, path)
+
+    def on_reset_check(self):
+        self.entry_check_file.delete(0, tk.END)
+        self.var_highlight.set(True)
+        self.txt_check_log.delete("1.0", tk.END)
 
     def on_run_check(self):
         in_path = self.entry_check_file.get().strip()
@@ -425,6 +451,11 @@ class BarcodesSuiteApp(tk.Tk):
                                           filetypes=[("Excel/CSV", "*.xlsx *.xlsm *.xls *.csv"), ("All files","*.*")])
         if path:
             self.entry_second.delete(0, tk.END); self.entry_second.insert(0, path)
+
+    def on_reset_twofile(self):
+        self.entry_existing.delete(0, tk.END)
+        self.entry_second.delete(0, tk.END)
+        self.txt_twofile_log.delete("1.0", tk.END)
 
     def on_run_twofile(self):
         first = self.entry_existing.get().strip(); second = self.entry_second.get().strip()
