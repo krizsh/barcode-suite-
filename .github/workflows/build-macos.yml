@@ -3,59 +3,49 @@ name: Build Barcodes Suite for macOS
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
     paths:
-      - '**/*.py'
-      - '.github/workflows/build-macos.yml'
+      - "barcodes_suite.py"
+      - "requirements.txt"
+      - ".github/workflows/build-macos.yml"
 
 jobs:
   build:
+    name: Build (${{ matrix.arch_label }})
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: macos-14
-            label: AppleSilicon   # M1/M2/M3
-          - os: macos-13
-            label: Intel
-    runs-on: ${{ matrix.os }}
+          - runner: macos-13
+            arch_label: Intel
+          - runner: macos-14
+            arch_label: AppleSilicon
+    runs-on: ${{ matrix.runner }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
-
-      # 🔎 Find barcodes_suite.py anywhere in the repo and expose its folder as "dir"
-      - name: Locate project file
-        id: find
-        shell: bash
-        run: |
-          set -e
-          FILE="$(git ls-files | grep -E '(^|/)(barcodes_suite\.py)$' | head -n1 || true)"
-          if [ -z "$FILE" ]; then
-            echo "ERROR: barcodes_suite.py not found in repository." >&2
-            exit 1
-          fi
-          DIR="$(dirname "$FILE")"
-          echo "dir=$DIR" >> $GITHUB_OUTPUT
-          echo "file=$FILE" >> $GITHUB_OUTPUT
-          echo "Found at: $FILE"
-          ls -la "$DIR"
+          python-version: "3.11"
 
       - name: Install deps
-  run: |
-    python -m pip install --upgrade pip
-    pip install pyinstaller openpyxl xlrd==1.2.0
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
 
       - name: Build app
-        working-directory: ${{ steps.find.outputs.dir }}
         run: |
           pyinstaller --noconfirm --windowed --name "Barcodes Suite" barcodes_suite.py
-          cd dist
-          zip -r "Barcodes_Suite_${{ matrix.label }}.zip" "Barcodes Suite.app"
+
+      - name: Zip app
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "dist/Barcodes Suite.app" "Barcodes_Suite_${{ matrix.arch_label }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Barcodes_Suite_${{ matrix.label }}
-          path: ${{ steps.find.outputs.dir }}/dist/Barcodes_Suite_${{ matrix.label }}.zip
+          name: Barcodes Suite macOS ${{ matrix.arch_label }}
+          path: Barcodes_Suite_${{ matrix.arch_label }}.zip
