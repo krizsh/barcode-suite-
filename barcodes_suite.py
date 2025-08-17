@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# Barcodes Suite (Offline) — v7
-# - Reset buttons on both tabs
-# - Masterlist check: per-column counts in row1/row2 for multi-column sheets
-# - Existing checker: per-column counts ("non-existing", "existing") in row1/row2 for multi-column sheets
-# - Stronger style clearing (fills + conditional formatting) to avoid retained highlights
-# - Matching: 5–14 digits after stripping leading zeros
-# - Reads .xlsx/.xlsm/.xls/.csv; scans all sheets
+# Barcodes Suite (Offline) — v8
+# - Reads barcodes separated by comma/semicolon/dash as individual codes.
+# - Joins hyphens inside a single code (no spaces) so "978-0-..." becomes one barcode.
+# - Tidier cleanup after removals.
+# - Includes v7 features (reset buttons, per-column summaries, strong clearing, toggle).
 
 import os, re, sys, csv, sqlite3
 from typing import Iterable, List, Set, Tuple, Dict
@@ -35,8 +33,12 @@ DB_NAME = "barcodes_suite.db"
 MASTER_TABLE = "masterlist"
 
 YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-DIGIT_RE = re.compile(r"\d{5,20}")  # capture padded runs; filter by 5–14 AFTER normalization
+DIGIT_RE = re.compile(r"\d{5,20}")
 MIN_LEN, MAX_LEN = 5, 14
+
+RE_HYPHEN_JOIN = re.compile(r"(?<=\d)-(?!\s)(?=\d)")
+RE_DASHES = re.compile(r"[–—-]")
+RE_SEP = re.compile(r"\s*[,;–—-]\s*")
 
 
 def normalize_barcode(code: str) -> str:
@@ -109,7 +111,11 @@ def load_workbook_generic(path: str):
 
 
 def extract_barcodes_from_text(text: str) -> List[str]:
-    return DIGIT_RE.findall(text or "")
+    if not text:
+        return []
+    s = RE_DASHES.sub("-", str(text))   # normalize – and — to -
+    s = RE_HYPHEN_JOIN.sub("", s)       # join 978-0-... -> 9780...
+    return DIGIT_RE.findall(s)
 
 
 def extract_barcodes_from_workbook_any(path: str) -> Tuple[Set[str], Dict[str, int]]:
@@ -252,6 +258,19 @@ def extract_barcodes_from_single_file(path: str) -> Set[str]:
     return found
 
 
+def tidy_text_after_removal(text: str) -> str:
+    if not text:
+        return text
+    s = RE_DASHES.sub("-", str(text))
+    s = re.sub(r"^[\s,;–—-]+|[\s,;–—-]+$", "", s)
+    s = re.sub(r"\s*[,;–—-]\s*([,;–—-]\s*)+", ", ", s)
+    s = re.sub(r"(^|[\s])[,;–—-]\s*", r"\1", s)
+    s = re.sub(r"\s*[-;]\s*", ", ", s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    s = re.sub(r"^,\s*|\s*,\s*$", "", s)
+    return s
+
+
 def remove_matches_existing(existing_codes: Set[str], second_path: str, out_path: str) -> Tuple[int,int,int,int]:
     wb = load_workbook_generic(second_path)
     clear_all_fills_and_rules(wb)
@@ -285,8 +304,7 @@ def remove_matches_existing(existing_codes: Set[str], second_path: str, out_path
                     else:
                         left_here += 1
 
-                import re as _re2
-                new_text = _re2.sub(r"\s{2,}", " ", new_text).strip()
+                new_text = tidy_text_after_removal(new_text)
 
                 if removed_here > 0 or left_here > 0:
                     cells_touched += 1
@@ -336,7 +354,6 @@ class BarcodesSuiteApp(tk.Tk):
         pad = 10
         nb = ttk.Notebook(self); nb.pack(fill="both", expand=True, padx=pad, pady=pad)
 
-        # Masterlist Tab
         self.tab_master = ttk.Frame(nb); nb.add(self.tab_master, text="Masterlist")
         self.lbl_master = ttk.Label(self.tab_master, text="Masterlist size: 0 barcodes", font=("Segoe UI", 10, "bold"))
         self.lbl_master.pack(anchor="w", padx=pad, pady=(pad, 4))
@@ -346,7 +363,6 @@ class BarcodesSuiteApp(tk.Tk):
         ttk.Label(self.tab_master, text="Reads .xlsx/.xlsm/.xls/.csv • Only 5–14 digits treated as barcodes (leading zeros ignored).",
                   wraplength=860, foreground="#444").pack(anchor="w", padx=pad)
 
-        # Check Against Masterlist
         self.tab_check = ttk.Frame(nb); nb.add(self.tab_check, text="Check Against Masterlist")
         ttk.Label(self.tab_check, text="Pick a file to check against the stored Masterlist.",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=pad, pady=(pad,4))
@@ -360,7 +376,6 @@ class BarcodesSuiteApp(tk.Tk):
         ttk.Button(act, text="Reset", command=self.on_reset_check).pack(side="left", padx=(8,0))
         self.txt_check_log = tk.Text(self.tab_check, height=12); self.txt_check_log.pack(fill="both", expand=True, padx=pad, pady=(0,pad))
 
-        # Existing Barcodes Checker
         self.tab_twofile = ttk.Frame(nb); nb.add(self.tab_twofile, text="Existing Barcodes Checker")
         ttk.Label(self.tab_twofile, text="Existing list vs. Second file (text + barcodes).",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=pad, pady=(pad,4))
